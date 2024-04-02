@@ -1,0 +1,926 @@
+---
+title: "Final Project"
+author: "Samarth Sathe"
+format: 
+    html : 
+      self-contained  : true
+editor: visual
+code-fold: true
+warning: false
+---
+
+# **Section 1.1: Exploratory Data Analysis and Time Series Decomposition**
+
+### [**About the Data**]{.underline}
+
+The data source is Zillow Research, which provides various datasets related to real estate. The specific dataset accessed from the provided link appears to offer research data related to housing markets, home values, rental prices, and other related metrics.
+
+Based on visual analysis of the webpage, the data-generating process seems to involve aggregation and analysis of real estate market data from various sources, including Zillow's own database, government agencies, real estate listings, and possibly other third-party sources. Zillow likely collects, cleans, and processes this data to generate insights and metrics that are useful for understanding trends and dynamics in the housing market.
+
+The datasets provided by Zillow Research are likely compiled using statistical methodologies, algorithms, and possibly machine learning techniques to ensure accuracy and relevance. They may also incorporate user-generated data, such as user reviews and feedback, to enhance the understanding of local real estate markets. Overall, the data-generating process involves a combination of data collection, processing, and analysis to produce comprehensive and informative datasets for researchers, policymakers, and industry professionals.
+
+```{r}
+#| label: load-packages
+library(zoo)
+library(lubridate)
+library(ggplot2)
+library(tibble)
+library(tsibble)
+library(dplyr)
+library(fpp3)
+library(feasts)
+library(urca)
+library(tseries)
+library(knitr)
+library(slider)
+library(here)
+library(fable)
+library(fable.prophet)
+library(gridExtra)
+library(ggtext)
+library(data.table)
+
+file_path <- here("Data","zillow_sales.csv")
+df <- read.csv(file_path)
+
+df<-df %>%
+mutate(date = ymd(date))
+df_tsbl<-as_tsibble(df, index = date)
+
+```
+
+# **Section 1.2: Data Summary**
+
+```{r}
+summary(df)
+```
+
+The summary provides information on the dataset columns: "RegionName", "date", and "zillow_sales". It indicates that the dataset contains 190 observations, with "RegionName" and "date" being character variables and "zillow_sales" likely representing housing sales data. The summary also includes statistical measures such as minimum, maximum, median, mean, and quartiles for the "date" and "zillow_sales" columns. This suggests the dataset spans from February 2008 to November 2023 and includes housing sales values ranging from 1082 to 4180, with a median of 2490.
+
+```{r}
+par(mfrow=c(1,2))
+hist(df_tsbl$zillow_sales, xlab="Zillow Sales", main = "")
+boxplot(df_tsbl$zillow_sales, horizontal = TRUE, xlab = "Zillow Sales")
+```
+
+-   **Distribution:** The histogram shows that the number of Zillow sales is right-skewed, meaning there are more sales with lower values and fewer sales with higher values. This is confirmed by the box plot, which shows that the median (the middle line of the box) is lower than the mean (the red diamond).
+
+# **Section 1.3: Time Series Analysis**
+
+```{r}
+line_chart <- ggplot(df_tsbl, aes(x = date, y = zillow_sales)) +
+  geom_line() +
+  labs(title = "Zillow Sales Over Time",
+       x = "YearMonth",
+       y = "Zillow House sales")
+
+line_chart
+```
+
+The graph shows a **general upward trend** in sales from 2010 to 2020. However, there is also some **seasonality** in the data, with sales appearing to be higher in the summer months.
+
+```{r}
+df_tsbl_ma <- df_tsbl %>%
+  arrange(date) %>%
+  mutate(
+    ma_right = slider::slide_dbl(zillow_sales, mean, .before = 12, .after = 0, .complete = TRUE),
+    ma_left = slider::slide_dbl(zillow_sales, mean, .before = 0, .after = 12, .complete = TRUE),
+    ma_center = slider::slide_dbl(zillow_sales, mean, .before = 6, .after = 6, .complete = TRUE),
+    ma_3 = slider::slide_dbl(zillow_sales, mean, .before = 1, .after = 1, .complete = TRUE),
+    ma_5 = slider::slide_dbl(zillow_sales, mean, .before = 2, .after = 2, .complete = TRUE),
+    ma_7 = slider::slide_dbl(zillow_sales, mean, .before = 3, .after = 3, .complete = TRUE),
+    ma_13 = slider::slide_dbl(zillow_sales, mean, .before = 6, .after = 6, .complete = TRUE),
+    ma_25 = slider::slide_dbl(zillow_sales, mean, .before = 12, .after = 12, .complete = TRUE),
+    ma_49 = slider::slide_dbl(zillow_sales, mean, .before = 24, .after = 24, .complete = TRUE)
+  )
+
+df_tsbl_ma_pivot <- df_tsbl_ma %>%
+  pivot_longer(
+    cols = ma_right:ma_49,
+    values_to = "value_ma",
+    names_to = "ma_order"
+  ) %>%
+  mutate(ma_order = factor(
+    ma_order,
+    levels = c(
+      "ma_center",
+      "ma_left",
+      "ma_right",
+      "ma_3",
+      "ma_5",
+      "ma_7",
+      "ma_13",
+      "ma_25",
+      "ma_49"
+    ),
+    labels = c(
+      "ma_center",
+      "ma_left",
+      "ma_right",
+      "ma_3",
+      "ma_5",
+      "ma_7",
+      "ma_13",
+      "ma_25",
+      "ma_49"
+    )
+  ))
+
+ggplot(df_tsbl_ma, aes(x = as.Date(date))) +
+  geom_line(aes(y = zillow_sales), size = 1) +
+  geom_line(aes(y = ma_13), size = 1, color = "red") +
+  scale_x_date(date_breaks = "3 year", date_labels = "%Y")+
+  theme_bw() +
+  labs(title = "MA of Zillow Sales Over Years",
+       x = "Year",
+       y = "Number of Home Sales")
+```
+
+It can be observed from that a centered moving average of order 13 summarizes the trend of the data.
+
+**Decomposition**
+
+**Remainder Series of Zillow Sales**
+
+```{r}
+zillow_tsbl_ma <- df_tsbl %>%
+  arrange(date) %>%
+  mutate(
+    ma_15 = slider::slide_dbl(zillow_sales, mean, .before = 2, .after = 2, .complete = TRUE)
+  )
+
+# Calculate remainder series
+zillow_tsbl_ma_remainder <- zillow_tsbl_ma %>%
+  mutate(remainder = zillow_sales - ma_15)
+
+# Plot the remainder series with fixed y-axis
+ggplot(zillow_tsbl_ma_remainder, aes(x = as.Date(date), y = remainder)) +
+  geom_line(color = "green", size = 1) +
+  theme_bw() +
+  labs(
+    title = "Remainder Series of Zillow Sales",
+    x = "Year",
+    y = "Remainder"
+  )
+```
+
+The presence of substantial residuals in the remainder series indicates that the Zillow data harbors intricacies beyond the grasp of a basic moving average. While the moving average effectively smooths the data and unveils trends, it might obscure some of the intricate patterns and interdependencies within the data.
+
+**Component**
+
+```{r}
+df_tsbl_decomp <- df_tsbl %>%
+  mutate(
+    ma_center = slider::slide_dbl(zillow_sales, mean, .before = 6, .after = 6, .complete = TRUE),
+    resid = zillow_sales - ma_center
+  ) 
+
+df_tsbl_decomp_plot <- df_tsbl_decomp %>%
+  pivot_longer(
+    cols = zillow_sales:resid,
+    names_to = "decomposition",
+    values_to = "value"
+  ) %>%
+  mutate(
+    decomposition = case_when(
+      decomposition == "zillow_sales" ~ "Zillow Sales",
+      decomposition == "ma_center" ~ "Trend",
+      decomposition == "resid" ~ "Remainder"
+    )
+  ) %>%
+  mutate(
+    decomposition = factor(
+      decomposition,
+      labels = c("Zillow Sales", "Trend", "Remainder"),
+      levels = c("Zillow Sales", "Trend", "Remainder")
+    )
+  ) %>%
+  ggplot() +
+  geom_line(aes(as.Date(date), value), size = 1) +
+  facet_wrap(
+    ~decomposition,
+    nrow = 3,
+    scales = "free"
+  ) +
+  theme_bw() +
+  ylab("") +
+  xlab("Month") +
+  ggtitle("Zillow Sales = Trend + Remainder")
+
+df_tsbl_decomp_plot
+```
+
+**Classical Decomposition**
+
+```{r include=FALSE}
+# CHANGING to test
+df_tsbl <- df_tsbl %>%
+  index_by(month = ~ yearmonth(.))
+
+df_tsbl<-as_tsibble(df_tsbl,index = month)
+
+```
+
+```{r}
+df_tsbl %>%
+  model(
+    classical_decomposition(zillow_sales)
+  ) %>%
+  components() %>%
+  autoplot()
+```
+
+1.  **Clear seasonality:** The plot shows a **strong and consistent seasonal pattern** in Zillow sales for Cincinnati, OH. Sales consistently peak in the **spring and summer months (April to July)** and decline in the **fall and winter months (August to March)**.
+2.  **Amplitude of the fluctuations:** The amplitude of the seasonal fluctuations is **relatively large**, meaning the difference between the peak and valley months is significant. This suggests that seasonality plays a major role in influencing Zillow sales in Cincinnati.
+
+The data exhibits a distinct annual seasonality, with the remaining fluctuations resembling white noise. To further investigate any potential residual correlations, we will analyze the lag plot.
+
+```{r}
+df_tsbl %>%
+  model(
+    classical_decomposition(zillow_sales,'additive')
+  ) %>%
+  components() %>%
+  gg_lag(random, geom = "point", lags = 1:4)+
+  geom_smooth(aes(color=NULL),method='lm',color='black',se=F)
+```
+
+There is no correlation, the time series has additive seasonality.
+
+## Splitting the dataset into Training and testing sets
+
+```{r include=FALSE}
+file_path <- here("Data","zillow_sales.csv")
+df <- read.csv(file_path)
+
+df<-df %>%
+mutate(date = ymd(date))
+df_tsbl<-as_tsibble(df, index = date)
+
+```
+
+```{r}
+split_index <- floor(0.8 * nrow(df_tsbl))
+
+# Select the first 80% of the data
+zillow_train <- df_tsbl[1:split_index, ]
+zillow_test <- df_tsbl[(split_index + 1):nrow(df_tsbl), ]
+```
+
+# **Section 2 - ARIMA Modeling**
+
+In this section, we will build a model of our data using the ARIMA methodology.
+
+```{r}
+
+zillow_roll <- zillow_train %>%
+  mutate(
+    zillow_mean = slide_dbl(
+      zillow_sales, 
+      mean,
+      .before=12,
+      .after=12,
+      .complete=TRUE),
+    zillow_sd = slide_dbl(
+      zillow_sales, 
+      sd,
+      .before=12,
+      .after=12)
+  )
+
+zillow_rollmean <- zillow_roll %>%
+  ggplot() +
+    geom_line(aes(date, zillow_sales)) +
+  geom_line(aes(date, zillow_mean),color='blue') +
+  theme_bw() +
+  ggtitle("Zillow Sales Mean over Time") +
+  ylab("Zillow Sales") +
+  xlab("Year")
+
+zillow_rollmean
+```
+
+From the graph above, we can see that the data is not mean stationary
+
+We will apply rolling standard deviation to check for variance stationary.
+
+```{r}
+zillow_rollsd <- zillow_roll %>%
+  ggplot() +
+  geom_line(aes(date, zillow_sales)) +
+  geom_smooth(aes(date,zillow_sd),method='lm', se=F)+
+  theme_minimal() +
+  ggtitle("Zillow Sales Standard Deviation over Time") +
+  ylab("Rolling Sd of Zillow Sales") +
+  xlab("Year")
+
+zillow_rollsd
+```
+
+## Transformation of Data
+
+To make a series variance stationary we will perform 2 types of transformations:
+
+1.  Log Transformation
+2.  Box-Cox Transformation
+
+**Log Transformation**
+
+```{r}
+lambda = zillow_train %>%
+  as_tsibble() %>%
+  features(zillow_sales, features = guerrero) %>%
+  pull(lambda_guerrero)
+
+zillow_trans <- zillow_train %>%
+  mutate(zillow_log = log1p(zillow_sales)) %>%
+  mutate(zillow_boxcox = box_cox(zillow_sales,lambda))
+
+zillow_trans %>%
+  ggplot() +
+  geom_line(aes(date, zillow_log)) +
+  theme_bw() +
+  labs(title = "Zillow Sales over Time(Log)",
+       x = "Year",
+       y = "Transformed Zillow Sales") +
+  theme(plot.title = ggtext::element_markdown())
+```
+
+**Box-Cox Transformation**
+
+```{r}
+zillow_trans %>%
+  ggplot() +
+  geom_line(aes(date, zillow_boxcox),color='blue') +
+  theme_bw() +
+  labs(title = "Zillow Sales over Time(<span style='color:blue'>Box-Cox</span>)",
+       x = "Date",
+       y = "Transformed Zillow Sales") +
+  theme(plot.title = ggtext::element_markdown())
+```
+
+**Rolling SD of Log transformed timeseries**
+
+```{r}
+zillow_log_roll <- zillow_trans %>%
+  mutate(log_zillow_sd = slide_dbl(
+      zillow_log, 
+      sd,
+      .before=12,
+      .after=12)
+  )
+
+zillow_log_rollsd <- zillow_log_roll %>%
+  ggplot() +
+  geom_line(aes(date, log_zillow_sd)) +
+  geom_smooth(aes(date,log_zillow_sd),method='lm',se=F)+
+  theme_bw() +
+  ggtitle("Zillow Sales Standard Deviation over Time (Log)") +
+  ylab("Zillow Sales") +
+  xlab("Year")
+
+zillow_log_rollsd
+```
+
+**Rolling SD of Box-Cox transformed timeseries**
+
+```{r}
+zillow_box_cox_roll <- zillow_trans %>%
+  mutate(box_cox_zillow_sd = slide_dbl(
+      zillow_boxcox, 
+      sd,
+      .before=12,
+      .after=12)
+  )
+
+zillow_box_rollsd <- zillow_box_cox_roll %>%
+  ggplot() +
+  geom_line(aes(date, box_cox_zillow_sd)) +
+  geom_smooth(aes(date,box_cox_zillow_sd),method='lm',se=F)+
+  theme_bw() +
+  ggtitle("Zillow Sales Standard Deviation over Time (Box Cox)") +
+  ylab("Zillow Sales") +
+  xlab("Year")
+
+zillow_box_rollsd
+```
+
+Looking at the rolling sds of both the transformed timeseries, Log transformation method has reduced variance more than that of Box-Cox Transformation.\
+We will go ahead with the Log transformation.
+
+We will check for seasonality in the data.
+
+```{r include=FALSE}
+## CHANGING
+file_path <- here("Data","zillow_sales.csv")
+df <- read.csv(file_path)
+
+df<-df %>%
+  mutate(date = ymd(date))
+df_tsbl<-tsibble(df,index = date)
+
+df_tsbl <- df_tsbl %>%
+  index_by(month = ~ yearmonth(.))
+
+df_tsbl<-as_tsibble(df_tsbl,index = month)
+
+split_index <- floor(0.8 * nrow(df_tsbl))
+
+# Select the first 80% of the data
+zillow_train <- df_tsbl[1:split_index, ]
+zillow_test <- df_tsbl[(split_index + 1):nrow(df_tsbl), ]
+
+```
+
+```{r}
+zillow_train %>%
+  gg_tsdisplay(zillow_sales,plot_type='partial', lag=36) +
+  labs(title="Raw Data", y="")
+```
+
+As we can see there is seasonality in the data hence we will take seasonal difference
+
+```{r}
+zillow_train %>%
+  gg_tsdisplay(difference(log(zillow_sales),12),
+               plot_type='partial', lag=24) +
+  labs(title="Seasonally differenced (log)", y="")
+```
+
+The data is mean stationary, so no need of standard differencing.
+
+Further, to see if there is mean stationarity, we will first see difference of log values.
+
+```{r}
+zillow_diff <- zillow_trans %>%
+  mutate(zillow_diff = zillow_log - lag(zillow_log)) %>%
+  as_tsibble(index=date)
+
+zillow_diff <- zillow_diff %>%
+  mutate(date = as.Date(date))
+
+zillow_diff %>%
+  ggplot() +
+  geom_line(aes(date, zillow_diff)) +
+  theme_bw() +
+  ggtitle("Zillow house sales over Time - Log; First Difference") +
+  ylab("Log Transformed Differenced Zillow Sales") +
+  xlab("Year")+
+  theme_bw()
+```
+
+**KPSS test for differenced log transformed data**
+
+```{r}
+#KPSS test for differenced log transformed data
+log_diff_value_kpss <- zillow_diff %>%
+features(zillow_diff, unitroot_kpss)
+log_diff_value_kpss
+```
+
+The KPSS test for differenced log transformed data suggests that the data is mean stationary and its also visible from the graph above.
+
+**ACF and PACF Plots**
+
+```{r include=FALSE}
+zillow_diff <- na.omit(zillow_diff)
+zillow_diff <- zillow_diff %>%
+  index_by(month = ~ yearmonth(.))
+zillow_diff<-as_tsibble(zillow_diff,index = month)
+
+```
+
+```{r}
+zillow_diff %>%
+  gg_tsdisplay(zillow_diff, plot_type = 'partial', lag_max = 18 )
+```
+
+Based on the analysis of the ACF/PACF plots in the provided image, it suggests that the time-series exhibits characteristics of an autoregressive (AR) process. The ACF plot shows a gradual decline, while the PACF plot displays a sharp cut-off after lag 1, which aligns with typical patterns observed in an AR process. The observed behavior hints at a potential ARIMA(0,1,3) model, indicating an autoregressive component of order 1 with no differencing and there might be a moving average component. There are three significant lags before an insignificant lag.
+
+However, the ACF plot also reveals significant lags at intervals of 12 lags, indicating a seasonal component with a period of 12. Consequently, we consider taking D = 1, representing the seasonal differencing component of the order. Although there is a dominant significant spike in lags after 12, it\'s noteworthy that there are additional lags slightly above the confidence intervals.
+
+## ARIMA Model selection.
+
+Let's build some models and compare them based on the BIC values.
+
+```{r}
+zillow_trans <- na.omit(zillow_trans)
+zillow_trans <- zillow_trans %>%
+  index_by(month = ~ yearmonth(.))
+zillow_trans<-as_tsibble(zillow_trans,index = month)
+```
+
+```{r}
+models_bic <- zillow_trans %>%
+  model(
+    mod1 = ARIMA(log(zillow_sales)~pdq(1,1,3)+PDQ(0,1,0)),
+    mod2 = ARIMA(log(zillow_sales)~pdq(0,1,3)+PDQ(1,0,0)),
+    mod3 = ARIMA(log(zillow_sales)~pdq(1,1,1)+PDQ(0,1,0)),
+    mod4 = ARIMA(log(zillow_sales)~pdq(1,1,2)+PDQ(0,1,0)),
+    mod5 = ARIMA(log(zillow_sales)~pdq(2,1,2)+PDQ(0,1,0))
+    
+  )
+
+models_bic %>%
+  glance()%>%
+    arrange(BIC)
+```
+
+Based on the BIC values above, model 3 ARIMA(0,1,3)(1,0,0) seems to be the best one.\
+It's close to what we have predicted above based on the ACF and PACF plots.
+
+Let's check what **Auto ARIMA** gives us.
+
+```{r}
+best_model <- zillow_train %>% 
+  model(   
+    ARIMA(log(zillow_sales),approximation=F,stepwise = F) ) %>% 
+  report()
+```
+
+The ARIMA(1,0,0)(2,1,0) model indicates the underlying structure of the time series data. This model suggests that the current value of the time series depends on its own lagged values (AR component) as well as the errors from the preceding observation (MA component). Additionally, the model accounts for seasonal differences with a lag of 1 (seasonal AR component) and a first-order seasonal difference (seasonal differencing component).
+
+In essence, the ARIMA(1,0,0)(2,1,0) model reveals that the time series is influenced by both its own past values and the errors from previous observations, along with seasonal patterns captured by lagged values and seasonal differencing.
+
+**Fitted values plotted against the observed values of the series**
+
+```{r}
+fitted <- best_model %>%
+  augment() %>%
+  .$.fitted
+
+ggplot() +
+  geom_line(aes(zillow_train$date, zillow_train$zillow_sales)) +
+  geom_line(aes(zillow_train$date, fitted), color = "blue", alpha = 0.4) +
+  theme_bw() +
+  xlab("Year") +
+  ylab("Zillow Sales")
+```
+
+The predicted values within the sample period effectively capture the underlying trends present in the data.
+
+## Analysis of Residuals
+
+```{r}
+best_model %>%
+  gg_tsresiduals()
+```
+
+There is no pattern observed in the ACF plot, and the histogram also appears to be normally distributed indicating no unusual pattern which tells us that there might be no correlation between the residuals of the best model.
+
+# **Section 3 - Meta Prophet Model**
+
+```{r include=FALSE}
+file_path <- here("Data","zillow_sales.csv")
+df <- read.csv(file_path)
+
+df<-df %>%
+  mutate(date = ymd(date))
+df_tsbl<-tsibble(df,index = date)
+
+df_tsbl <- df_tsbl %>%
+  index_by(month = ~ yearmonth(.))
+
+df_tsbl<-as_tsibble(df_tsbl,index = month)
+```
+
+**Fitting the Prophet Model**
+
+```{r}
+zillow_train %>%
+  model(prophet = prophet(zillow_sales)) %>%
+  forecast(h = 48) %>%
+  autoplot(zillow_train %>% bind_rows(zillow_test)) +
+  ylab('Zillow House Sales') +
+  xlab('Year Month') +
+  labs(title = 'Zillow House Sales Forecast with Prophet Model') +
+  theme_bw()
+```
+
+**Forecast:** The blue line represents the predicted future values of the time series, for the next 36 months.
+
+**Seasonality:** The cyclical pattern in the forecast suggests that the model has captured some seasonal component in the data, possibly monthly or yearly seasonality.
+
+**Trend:** The overall upward trend in the forecast indicates that the model predicts an increase in the values over time.
+
+## Prophet Decomposition
+
+```{r}
+model = zillow_train %>%
+    model(prophet = fable.prophet::prophet(zillow_sales))
+
+model %>%
+components() %>%
+autoplot()
+```
+
+-   The Prophet model has decomposed the time series into its trend, seasonality, and holiday effects, along with daily residuals.
+
+-   The trend suggests a generally upward trajectory in the data over time.
+
+-   The seasonal component captures recurring patterns, potentially indicating monthly or yearly variations in the data.
+
+-   The daily residuals represent the remaining discrepancies between the actual data and the fitted model, which are expected to be random and relatively small.
+
+## Change point detection
+
+```{r}
+changepoints = model %>%
+glance() %>%
+pull(changepoints) %>%
+bind_rows() %>%
+.$changepoints
+
+zillow_train %>%
+ggplot()+
+geom_line(aes(month,zillow_sales))+
+geom_vline(xintercept=as.Date(changepoints),color='red',linetype='dashed')
+```
+
+**Changepoints:**
+
+-   The vertical dashed lines represent potential changepoints in the trend of Zillow sales data. These are points in time where the model identifies a significant shift in the underlying pattern.
+
+-   The presence of changepoints suggests that the trend in Zillow sales data is not constant over time. There might be periods of sudden increase or decrease, which the model has captured by introducing these changepoints.
+
+-   The specific locations of the changepoints can provide insights into potential events or factors that might have influenced the sales trends. For example, a changepoint could coincide with a significant economic event, a change in marketing strategy, or a seasonal shift in demand.
+
+**Detection of Saturation Point**
+
+```{r}
+zillow_train %>%
+    model(
+        prophet_orig = fable.prophet::prophet(zillow_sales)
+        ) %>%
+    forecast(h=48) %>%
+    autoplot(zillow_train)
+```
+
+**Specifying Saturation Point**
+
+```{r}
+zillow_train %>%
+    model(
+        prophet_orig = fable.prophet::prophet(zillow_sales),
+        prophet_saturating = fable.prophet::prophet(zillow_sales~growth(type='linear')+season('year'))
+        ) %>%
+    forecast(h=48) %>%
+    autoplot(zillow_train %>%
+    filter(year(date) >= 2021),level=NULL)
+```
+
+```{r}
+zillow_train %>%
+    model(
+        prophet_orig = fable.prophet::prophet(zillow_sales),
+        prophet_saturating = fable.prophet::prophet(zillow_sales~growth(type='logistic',capacity=2000,floor=0)+season('year'))
+        ) %>%
+    forecast(h=48) %>%
+    autoplot(zillow_train %>%
+    filter(year(date) >= 2021),level=NULL)
+```
+
+Following the implementation of the Prophet model on our time-series data, it became apparent that a linear trend model was more fitting compared to a logistic trend model. This determination was made after analyzing the model outputs and observing the trends captured by Prophet. The linear trend model demonstrated a better alignment with the underlying patterns present in the data, thus establishing its suitability for our forecasting needs.
+
+#### Checking for seasonality
+
+```{r}
+weekly_seasonality = model %>%
+components() %>%
+as_tibble() %>%
+mutate(wday = lubridate::wday(month,label = TRUE,abbr=T)) %>%
+group_by(wday) %>%
+summarize(weekly = mean(weekly,na.rm=T)) %>%
+ungroup() %>%
+ggplot()+
+geom_line(aes(wday,weekly,group=1))+
+ggtitle("Average Weekly Seasonality")
+
+yearly_seasonality = model %>%
+components() %>%
+autoplot(yearly)+
+ggtitle("Yearly Seasonality")
+
+weekly_seasonality_plot <- weekly_seasonality +
+  geom_line(aes(wday, weekly, group = 1))
+
+# Yearly Seasonality Plot
+yearly_seasonality_plot <- yearly_seasonality
+# Combine and display plots vertically
+grid.arrange(weekly_seasonality_plot, yearly_seasonality_plot, ncol = 1)
+```
+
+```{r}
+zillow_seasonality <- zillow_train %>%
+    model(
+      additive = fable.prophet::prophet(zillow_sales~growth()+season(period='year',type='additive')),
+      multiplicative = fable.prophet::prophet(zillow_sales~growth()+season(period='year',type='multiplicative')))
+
+zillow_seasonality %>%
+components() %>%
+autoplot()
+```
+
+**Yearly Seasonality:**
+
+-   **Summer:** The seasonal index is **higher** in **summer months (June, July, August)**, indicating that the time series values tend to be **higher** on average during these months.
+
+-   **Winter:** The seasonal index is **lower** in **winter months (December, January, February)**, indicating that the time series values tend to be **lower** on average during these months.
+
+The graph suggests that the time series exhibits **yearly seasonality** and there is no need to check for holiday seasonality as the data is not daily data.
+
+# **Section 4 - Model Comparison and Validation**
+
+**Cross Validation Scheme**
+
+Initially, we\'ll incorporate 5 years of data for the initial training period and then increment it by 12 months (1 year) for each subsequent step.
+
+```{r}
+zillow_cv = zillow_train %>%
+  stretch_tsibble(.init = 60, .step = 12)
+
+zillow_cv %>%
+    ggplot()+
+    geom_point(aes(date,factor(.id),color=factor(.id)))+
+    ylab('Iteration')+
+    ggtitle('Samples included in each CV Iteration')
+```
+
+```{r}
+zillow_cv_forecast = zillow_cv %>%
+  model(
+    naive_w_drift = NAIVE(zillow_sales~drift()),
+    best_arima = ARIMA(log(zillow_sales)~pdq(1,0,0)+PDQ(2,1,0)),
+    prophet_model = prophet(zillow_sales)) %>%
+  forecast(h = 6)
+
+zillow_cv_forecast %>%
+  autoplot(zillow_cv)+
+  facet_wrap(~.id,nrow=4)+
+  theme_bw()+
+  ylab('Zillow Sales')
+```
+
+```{r}
+zillow_cv_forecast %>%
+    as_tsibble() %>%
+    dplyr::select(-zillow_sales) %>%
+    left_join(
+        df_tsbl
+    ) %>%
+    ggplot()+
+    geom_line(aes(month,zillow_sales))+
+    geom_line(aes(month,.mean,color=factor(.id),linetype=.model))+
+    scale_color_discrete(name='Iteration')+
+    theme_bw()
+```
+
+The prophet model appears to be the best fit for the 6th iteration.
+
+## Model Performance at each Horizon
+
+**Distribution of Absolute Error at each Horizon**
+
+```{r}
+zillow_cv_forecast %>%
+  as_tibble() %>%
+  dplyr::select(-zillow_sales) %>%
+  left_join(df_tsbl) %>%
+  group_by(.id,.model) %>%
+  mutate(
+    weeks_ahead = seq(1:6)
+  ) %>%
+  ungroup() %>%
+  mutate(error = abs(zillow_sales - .mean)) %>%
+  ggplot()+
+  geom_boxplot(aes(factor(weeks_ahead),error))+
+  geom_point(aes(factor(weeks_ahead),error,color=factor(.id)),alpha=0.4)+
+  facet_wrap(~.model,ncol=1)+
+  guides(color='none')+
+  ylab('Absolute Error')+
+  xlab('Weeks Ahead')+
+  ggtitle('Absolute Error by Iteration, ARIMA,NAIVE and PROPHET')
+```
+
+**RMSE at each Horizon**
+
+```{r}
+zillow_cv_forecast %>%
+  as_tibble() %>%
+  dplyr::select(-zillow_sales) %>%
+  left_join(df_tsbl) %>% 
+  group_by(.id,.model) %>%
+  mutate(
+    weeks_ahead = seq(1:6)
+  ) %>%
+  ungroup() %>% 
+  filter(!is.na(zillow_sales)) %>%
+  group_by(weeks_ahead,.model) %>%
+  summarize(
+    rmse = sqrt(mean((zillow_sales - .mean)^2,na.rm=T)),
+  ) %>%
+  ungroup() %>%
+  ggplot()+
+  geom_line(aes(weeks_ahead,rmse,color=.model))+
+  xlab("Weeks Ahead")+
+  ylab("RMSE")
+```
+
+Observing the RMSE graph depicted above, it is evident that the ARIMA model outperforms the other models.
+
+**Full Error Metrics by Iteration**
+
+```{r}
+zillow_cv_forecast %>%
+  group_by(.id) %>%
+  accuracy(df_tsbl) %>%
+  ungroup() %>%
+  data.table()
+```
+
+**Average Accuracy Comparison**
+
+```{r}
+zillow_cv_forecast %>%
+  accuracy(df_tsbl) %>%
+  data.table()
+```
+
+Lower values of RMSE (Root Mean Squared Error) and MASE (Mean Absolute Scaled Error) indicate better performance of the model. Upon comparing these metrics, it becomes evident that the ARIMA model outperforms the other models.
+
+```{r}
+zillow_cv_forecast %>%
+  group_by(.id,.model) %>%
+  mutate(h = row_number()) %>%
+  ungroup() %>%
+  as_fable(response = "zillow_sales", distribution = zillow_sales) %>%
+  accuracy(df_tsbl, by = c("h", ".model")) %>%
+  ggplot(aes(x = h, y = RMSE,color=.model)) +
+  geom_point()+
+  geom_line()+
+  ylab('Average RMSE at Forecasting Intervals')+
+  xlab('Months in the Future')
+```
+
+The graph also indicates that ARIMA model is better.
+
+```{r}
+zillow_cv_forecast %>%
+  group_by(.id,.model) %>%
+  mutate(h = row_number()) %>%
+  ungroup() %>%
+  as_fable(response = "zillow_sales", distribution = zillow_sales) %>%
+  accuracy(df_tsbl, by = c("h", ".model")) %>%
+  mutate(MAPE = MAPE/100) %>% # Rescale
+  ggplot(aes(x = h, y = MAPE,color=.model)) +
+  geom_point()+
+  geom_line()+
+  theme_bw()+
+  scale_y_continuous(
+    name = 'Average MAPE at Forecasting Intervals',labels=scales::percent)
+```
+
+Upon analyzing the RMSE and MAPE plots provided above, it can be concluded that the ARIMA forecast model demonstrates superior performance compared to the Prophet model for our time series forecasting task. This observation is consistent with our initial expectations.
+
+## Final Test Set Forecast
+
+```{r}
+zillow_train_mod <- zillow_train %>%
+  model(
+    prophet(zillow_sales)
+  )
+```
+
+```{r}
+zillow_train_mod %>%
+    forecast(h=48) %>%
+    autoplot(zillow_train %>%
+    bind_rows(zillow_test))+
+    ylab('Zillow Sales')+
+    theme_bw()
+```
+
+```{r}
+zillow_train_mod %>%
+    forecast(h=48) %>%
+    accuracy(zillow_test)
+```
+
+## Forecast for the Prophet Model
+
+```{r}
+zillow_full_model <- df_tsbl %>%
+  model(
+    arima = ARIMA(zillow_sales)
+  )
+```
+
+```{r}
+zillow_full_model %>%
+    forecast(h=48) %>%
+    autoplot(df_tsbl) %>%+ 
+    ylab('Zillow House Sales')+
+    theme_bw()
+```
+
+The forecasted values demonstrate a strong alignment with the observed trend in the time series data, indicating that the forecasting model adequately captures the underlying patterns and variations in the dataset.
